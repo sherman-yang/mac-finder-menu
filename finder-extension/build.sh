@@ -89,8 +89,9 @@ cat > "$EXT/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# The scripts ride along inside the extension so there is no external path to break.
-cp "$SCRIPTS/compress.zsh" "$SCRIPTS/showsize.zsh" "$EXT/Contents/Resources/"
+# Every script rides along inside the extension so there is no external path to
+# break. Copying the whole directory means adding a menu item never touches this.
+cp "$SCRIPTS"/*.zsh "$EXT/Contents/Resources/"
 
 # --- sign (ad-hoc) --------------------------------------------------------
 # Inside-out: extension first, then the app that contains it. Only the extension

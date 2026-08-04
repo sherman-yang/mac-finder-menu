@@ -1,94 +1,34 @@
 # mac-finder-menu
 
-Finder right-click menu items for macOS transparent file compression (AFSC / decmpfs).
+Add your own items to the macOS Finder right-click menu.
 
-Two actions, both at the **top level** of the context menu:
+Each menu item is a plain `zsh` script that receives the selected file and
+folder paths as arguments. The project handles the part that is actually hard:
+getting an item to show up in Finder's context menu at all.
+
+## Menu items included
+
+Four ship with the project today.
 
 | Menu item | What it does |
 |---|---|
-| **Compress (APFS Transparent)** | Recursively applies AFSC compression to the selection via `applesauce`, then reports before / after / savings |
-| **Show Actual Size on Disk** | Reports real on-disk usage vs logical size, plus compression coverage: how many files are compressed, how many are not, and how much those still occupy |
+| **Compress (APFS Transparent)** | Applies AFSC transparent compression to the selection |
+| **Show Actual Size on Disk** | Real on-disk usage vs logical size, plus compression coverage |
+| **Open in VS Code (New Window)** | Opens the selection as a fresh workspace window |
+| **Add to VS Code Workspace** | Sends the selection to the last active window instead |
 
-Files stay in place, keep their names, and open normally in every app. Only the
-disk footprint shrinks — the kernel decompresses on read.
+### Compress (APFS Transparent)
 
-## Why
+Recursively applies AFSC compression to the selection via
+[`applesauce`](https://github.com/Dr-Emann/applesauce), then reports before /
+after / savings. Files keep their names and open normally in every app — the
+kernel decompresses on read. Only the disk footprint shrinks.
 
-macOS has had transparent per-file compression since 10.6 and it works on APFS,
-but unlike NTFS there is **no directory attribute that auto-compresses new
-files**. Compression is applied per file, once, by a userspace tool. This repo
-wraps that tool in a right-click menu so it is a two-click operation instead of
-a terminal command.
+Runs with `--verify`, so every file is read back and compared before the
+compressed version replaces the original. Measured cost on mixed data: +32 %
+wall clock.
 
-See [docs/FINDINGS.md](docs/FINDINGS.md) for the measured behaviour of AFSC on
-macOS 26.6 — what survives a copy, what silently drops compression, and how to
-detect compressed files.
-
-## Requirements
-
-- macOS 26.0 or later (built and verified on 26.6, Apple Silicon)
-- Xcode **Command Line Tools** (`swiftc`, `codesign`) — full Xcode is not needed
-- [`applesauce`](https://github.com/Dr-Emann/applesauce):
-  ```
-  brew install Dr-Emann/homebrew-tap/applesauce
-  ```
-  The compress action expects it at `/opt/homebrew/bin/applesauce` and shows a
-  dialog with install instructions if it is missing.
-
-No Apple Developer account is required — the extension is ad-hoc signed.
-
-## Install
-
-```
-./install.sh
-```
-
-This builds and installs two front-ends:
-
-1. **FinderSync extension** → `/Applications/AFSC Finder Menu.app`, registered
-   with `pluginkit`. Produces the top-level menu items.
-2. **Automator Quick Actions** → `~/Library/Services/`. Same two actions in the
-   Services submenu, as a fallback for iCloud-managed locations (see
-   Limitations).
-
-Finder restarts at the end. If the extension does not appear, check it is
-enabled under **System Settings → General → Login Items & Extensions →
-Extensions → Finder**.
-
-## Uninstall
-
-```
-./uninstall.sh
-```
-
-Already-compressed files are untouched and stay readable — compression is a
-filesystem feature, not something this tool has to be present for. To undo
-compression itself:
-
-```
-applesauce decompress <path>
-```
-
-## Limitations
-
-- **iCloud Desktop & Documents.** When "Desktop & Documents Folders" sync is on,
-  Finder's own CloudDocs menu provider suppresses FinderSync extension items.
-  The Quick Actions in the Services submenu still work there — that is why both
-  front-ends are installed.
-- **Editing a file drops its compression.** Any app that rewrites the file
-  writes it back uncompressed. Re-run the action after changes. This makes AFSC
-  a good fit for archives and a poor fit for active working directories.
-- **Incompressible files are re-read on every run.** Files that cannot be
-  compressed get no marker, so each run reads them again to find out. Measured:
-  400 MB of incompressible data costs ~1 s every time. Do not point this at a
-  large photo or video library repeatedly.
-- **Already-compressed files are skipped instantly** — those *do* carry the
-  `UF_COMPRESSED` flag, so re-running on a mostly-compressed tree is nearly
-  free.
-
-## Guards
-
-The compress action refuses to touch:
+Refuses to touch:
 
 | Guard | How it is detected |
 |---|---|
@@ -100,26 +40,129 @@ The compress action refuses to touch:
 Skipped items are listed with their reason in the result dialog; the rest of the
 selection is still processed.
 
-`applesauce --verify` is enabled: every file is read back and compared before the
-compressed version replaces the original. Measured cost on mixed data: +32 %
-wall clock.
+### Open in VS Code (New Window) / Add to VS Code Workspace
+
+Two separate actions, both accepting files and folders.
+
+*New Window* runs `code --new-window` on the whole selection, so it always lands
+in a fresh workspace window.
+
+*Add to Workspace* sends the selection to the last active window instead. The
+two kinds of item mean different things there, so they take different flags:
+folders go through `--add` to become workspace roots (VS Code documents `--add`
+as taking a `<folder>`), files through `--reuse-window` to open as editors in
+that same window. A mixed selection gets both.
+
+Both start VS Code through LaunchServices first if it is not already running.
+That is deliberate: the Finder extension is sandboxed, and a VS Code launched as
+its child would inherit the sandbox. Once VS Code is up, the `code` CLI only
+talks to it over IPC and exits.
+
+### Show Actual Size on Disk
+
+Reports real on-disk usage vs logical size, plus compression coverage: how many
+files are compressed, how many are not, and how much those still occupy. Finder
+itself shows only the logical size, so this is the way to see whether a folder
+is actually compressed and how much is left on the table.
+
+## How menu items get into Finder
+
+macOS offers exactly two placements, and this project installs both because
+neither covers every case.
+
+| Front-end | Placement | Mechanism |
+|---|---|---|
+| `finder-extension/` | **Top level** of the context menu | FinderSync app extension (`FIFinderSync`) — the same route Dropbox and BetterZip use |
+| `quick-actions/` | Services / Quick Actions submenu | Automator `.workflow` bundles |
+
+Services and Quick Actions can never be promoted out of their submenu — a
+FinderSync extension is the only supported way to reach the top level. The
+Quick Actions exist as a fallback because Finder suppresses FinderSync items in
+iCloud-managed locations (see Limitations).
+
+Both front-ends embed the same scripts from `scripts/` at build time, so a menu
+item's logic has one home.
+
+## Adding your own menu item
+
+1. Write `scripts/<name>.zsh`. It receives the selected paths as `"$@"`. Show a
+   result with `osascript` if the action needs one — `vscode.zsh` is the
+   shortest example, `showsize.zsh` the most complete.
+2. Register it in both front-ends:
+   - `finder-extension/src/FinderSyncExt.swift` — add an `NSMenuItem` in
+     `menu(for:)` plus an `@objc` action calling `run(script:)`
+   - `quick-actions/build_quickactions.py` — add an entry to `ACTIONS`
+3. `./install.sh`
+
+The build copies every `scripts/*.zsh` into the extension, so there is nothing
+to edit in `build.sh`. Menu items are declared in source rather than in a config
+file, so adding one means editing those two places.
+
+## Requirements
+
+- macOS 26.0 or later (built and verified on 26.6, Apple Silicon)
+- Xcode **Command Line Tools** (`swiftc`, `codesign`) — full Xcode is not needed
+- **No Apple Developer account.** The extension is ad-hoc signed. It must be
+  sandboxed, which is a hard requirement of `pkd`, but a signing identity is not.
+Per-menu-item requirements, each reported in a dialog if missing:
+
+- **Compress (APFS Transparent)** needs `applesauce` at
+  `/opt/homebrew/bin/applesauce`:
+  ```
+  brew install Dr-Emann/homebrew-tap/applesauce
+  ```
+- **Open in VS Code (New Window)** and **Add to VS Code Workspace** need Visual
+  Studio Code in `/Applications` or `~/Applications` (Spotlight is used as a
+  fallback). Adding to an existing workspace additionally needs the bundled
+  `code` CLI, since LaunchServices cannot express it.
+
+## Install
+
+```
+./install.sh
+```
+
+Builds and installs both front-ends, registers the extension with `pluginkit`,
+and restarts Finder. If the top-level items do not appear, check the extension
+is enabled under **System Settings → General → Login Items & Extensions →
+Extensions → Finder**.
+
+## Uninstall
+
+```
+./uninstall.sh
+```
+
+Files compressed by the bundled action are untouched and stay readable —
+compression is a filesystem feature, not something this tool has to be present
+for. To undo compression itself: `applesauce decompress <path>`.
+
+## Limitations
+
+- **iCloud Desktop & Documents.** With "Desktop & Documents Folders" sync on,
+  Finder's own CloudDocs menu provider suppresses FinderSync extension items.
+  The Services submenu still works there — that is why both front-ends are
+  installed.
+- **The extension must live in `/Applications`.** `pkd` does not discover
+  extensions in `~/Applications`.
+- Specific to the bundled compress action: editing a file drops its
+  compression, and incompressible files are re-read on every run because they
+  carry no "already tried" marker. Details and measurements in
+  [docs/FINDINGS.md](docs/FINDINGS.md).
 
 ## Layout
 
 ```
-scripts/              compress.zsh, showsize.zsh — the actual logic, single source of truth
+scripts/              the menu item scripts — single source of truth
 finder-extension/     Swift FinderSync app extension (top-level menu items)
   src/                FinderSyncExt.swift, host.swift
-  ext.entitlements    sandbox + temporary exception (both mandatory, see FINDINGS)
+  ext.entitlements    sandbox + temporary exception (both mandatory)
   build.sh
-quick-actions/        Automator .workflow builder (Services submenu fallback)
+quick-actions/        Automator .workflow builder (Services submenu)
 install.sh
 uninstall.sh
 docs/FINDINGS.md      measured macOS behaviour behind every design decision
 ```
-
-Both front-ends embed the same two scripts from `scripts/` at build time, so
-there is one place to edit. Re-run `./install.sh` after changing them.
 
 ## License
 

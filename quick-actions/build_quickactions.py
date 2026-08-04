@@ -29,11 +29,27 @@ ACTIONS = [
         "menu": "Show Actual Size on Disk",
         "script": "showsize.zsh",
     },
+    {
+        "bundle": "Open in VS Code (New Window).workflow",
+        "menu": "Open in VS Code (New Window)",
+        "script": "vscode.zsh",
+    },
+    {
+        "bundle": "Add to VS Code Workspace.workflow",
+        "menu": "Add to VS Code Workspace",
+        "script": "vscode-add.zsh",
+    },
 ]
+
+
+# Stamped into every bundle this builder produces so install.sh and
+# uninstall.sh can tell our Quick Actions apart from the user's own.
+OWNER_KEY = "MacFinderMenuOwned"
 
 
 def info_plist(menu_name):
     return {
+        OWNER_KEY: True,
         "NSServices": [
             {
                 "NSMenuItem": {"default": menu_name},
@@ -125,7 +141,13 @@ def wflow(script_body):
 
 
 def main(outdir):
-    os.makedirs(outdir, exist_ok=True)
+    # Clear the whole output directory, not just the bundles about to be
+    # written: a renamed menu item would otherwise leave its old bundle behind
+    # for install.sh to pick up and install alongside the new one.
+    if os.path.isdir(outdir):
+        shutil.rmtree(outdir)
+    os.makedirs(outdir)
+
     for spec in ACTIONS:
         with open(os.path.join(SCRIPTS, spec["script"]), "r", encoding="utf-8") as fh:
             body = fh.read()

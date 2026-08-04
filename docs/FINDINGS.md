@@ -5,9 +5,123 @@ Everything here was measured on this machine, not recalled from documentation.
 **Test environment:** macOS 26.6 (build 25G72), Apple Silicon, APFS,
 `applesauce` 0.5.28, August 2026.
 
+Sections 1–3 cover getting a custom item into the Finder context menu at all —
+the part of this project that is reusable for any menu item. Section 4 covers
+the compression behaviour behind the two items that ship with it.
+
 ---
 
-## 1. AFSC compression itself
+## 1. Getting an item into the Finder context menu
+
+### Services and Quick Actions cannot be promoted
+
+Automator Quick Actions and Services always render inside their submenu. The
+only supported route to a **top-level** context menu item is a **FinderSync app
+extension** (`FIFinderSync`) — which is what Dropbox, BetterZip, Beyond Compare
+and similar apps use.
+
+`defaults write -g NSServicesMinimumItemCountForContextSubmenu -int 999` flattens
+the Services submenu inline. The key still exists in the macOS 26.6 AppKit
+(the string is present in the dyld shared cache). It is global, though: on a
+machine with 17 file/folder services it produces a worse menu than the submenu.
+
+### pkd requires a sandboxed extension — but not a Developer ID
+
+This was the whole ballgame, and `pluginkit` gives no useful feedback: it exits
+0 and registers nothing. The reason only shows up in the log:
+
+```
+pkd: Registering plugin at [...]
+pkd: plugin UNINSTALLED; bundleID: [...], contained in [(null)]
+```
+
+Comparing field by field against a working extension on the same machine left
+two differences: a `teamID`, and the sandbox entitlement. Adding
+**`com.apple.security.app-sandbox`** to the ad-hoc signature made it register
+immediately.
+
+**An ad-hoc signature (`codesign -s -`) is sufficient. No Apple Developer
+account is needed. Sandboxing is mandatory.**
+
+To watch this for yourself:
+
+```sh
+log stream --style compact --predicate 'process == "pkd"'
+```
+
+### A sandboxed extension can still do the work
+
+The sandbox does not have to be a dead end.
+`com.apple.security.temporary-exception.files.absolute-path.read-write = /`
+grants the extension — and any child process it spawns — read-write access
+everywhere. Verified end-to-end: right-click → Compress on a 17 MB folder
+produced 88 KB on disk with `UF_COMPRESSED` set on files in subdirectories, no
+sandbox denials logged.
+
+This is what makes "menu item = shell script" viable at all: the extension
+spawns `/bin/zsh` with the selected paths as arguments, and the child inherits
+the sandbox *including* the exception.
+
+### Other requirements found by comparison
+
+The `.appex` `Info.plist` needs all of these, or pkd discovers the plug-in and
+then drops it:
+
+- `NSPrincipalClass = NSApplication`
+- `LSUIElement = true`
+- `CFBundleSupportedPlatforms = [MacOSX]`
+- `CFBundlePackageType = XPC!`
+
+Build notes:
+
+- Link the extension with `-Xlinker -e -Xlinker _NSExtensionMain` — app
+  extensions enter through `NSExtensionMain`, not `main()`.
+- Use `@objc(FinderSyncExt)` on the principal class so `Info.plist` can name it
+  without Swift's `<module>.<class>` mangling.
+- Sign inside-out: extension first, then the containing app. Only the extension
+  carries the entitlements.
+
+### Install location matters
+
+`pkd` does **not** pick up extensions from `~/Applications`. The same bundle in
+`/Applications` registers immediately.
+
+### iCloud Desktop & Documents suppresses FinderSync items
+
+With "Desktop & Documents Folders" sync on, `~/Desktop` is a CloudDocs-managed
+location (`~/Library/Mobile Documents/com~apple~CloudDocs/Desktop` is a symlink
+to it, and the context menu grows *Remove Download* / *Keep Downloaded*).
+FinderSync extension items do not appear there. The same folder moved to a plain
+local path shows them immediately.
+
+The Services submenu **is** present on iCloud items, so Automator Quick Actions
+remain a working fallback for those locations. This is the reason this project
+installs both front-ends rather than just the extension.
+
+---
+
+## 2. Automator gotchas
+
+**`inputMethod` is inverted from the obvious reading.** In the Run Shell Script
+action: `0` = pass input to **stdin**, `1` = pass input as **arguments**. With
+`0`, `"$@"` is empty and the script silently does nothing.
+
+---
+
+## 3. zsh gotchas
+
+Two zsh-specific traps hit while writing the menu item scripts:
+
+- **`path` is a special variable** tied to `$PATH` as an array. A local named
+  `path` makes `${path[1,5]}` do array subscripting instead of string slicing,
+  so prefix comparisons silently never match. Use `[[ $tgt == "$m"/* ]]` and a
+  different variable name.
+- **`status` is read-only** (an alias for `$?`). Assigning to it aborts the
+  script.
+
+---
+
+## 4. AFSC compression — the behaviour behind the bundled menu items
 
 Transparent compression (AFSC / `decmpfs`) exists on both HFS+ and APFS. The
 kernel decompresses on read, so files keep their names, sizes and behaviour.
@@ -101,108 +215,3 @@ path list:
 |---|---|
 | `/System` `/usr` `/bin` `/sbin` | yes |
 | `/` `/Applications` `/Library` `/usr/local` `~` `~/Library` | no |
-
----
-
-## 2. Finder context menu placement
-
-### Services and Quick Actions cannot be promoted
-
-Automator Quick Actions and Services always render inside their submenu. The
-only supported route to a **top-level** context menu item is a **FinderSync app
-extension** (`FIFinderSync`) — which is what Dropbox, BetterZip, Beyond Compare
-and similar apps use.
-
-`defaults write -g NSServicesMinimumItemCountForContextSubmenu -int 999` flattens
-the Services submenu inline. The key still exists in the macOS 26.6 AppKit
-(the string is present in the dyld shared cache). It is global, though: on a
-machine with 17 file/folder services it produces a worse menu than the submenu.
-
-### pkd requires a sandboxed extension — but not a Developer ID
-
-This was the whole ballgame, and `pluginkit` gives no useful feedback: it exits
-0 and registers nothing. The reason only shows up in the log:
-
-```
-pkd: Registering plugin at [...]
-pkd: plugin UNINSTALLED; bundleID: [...], contained in [(null)]
-```
-
-Comparing field by field against a working extension on the same machine left
-two differences: a `teamID`, and the sandbox entitlement. Adding
-**`com.apple.security.app-sandbox`** to the ad-hoc signature made it register
-immediately.
-
-**An ad-hoc signature (`codesign -s -`) is sufficient. No Apple Developer
-account is needed. Sandboxing is mandatory.**
-
-To watch this for yourself:
-
-```sh
-log stream --style compact --predicate 'process == "pkd"'
-```
-
-### A sandboxed extension can still do the work
-
-The sandbox does not have to be a dead end.
-`com.apple.security.temporary-exception.files.absolute-path.read-write = /`
-grants the extension — and the `zsh` child it spawns — read-write access
-everywhere. Verified end-to-end: right-click → Compress on a 17 MB folder
-produced 88 KB on disk with `UF_COMPRESSED` set on files in subdirectories, no
-sandbox denials logged.
-
-### Other requirements found by comparison
-
-The `.appex` `Info.plist` needs all of these, or pkd discovers the plug-in and
-then drops it:
-
-- `NSPrincipalClass = NSApplication`
-- `LSUIElement = true`
-- `CFBundleSupportedPlatforms = [MacOSX]`
-- `CFBundlePackageType = XPC!`
-
-Build notes:
-
-- Link the extension with `-Xlinker -e -Xlinker _NSExtensionMain` — app
-  extensions enter through `NSExtensionMain`, not `main()`.
-- Use `@objc(FinderSyncExt)` on the principal class so `Info.plist` can name it
-  without Swift's `<module>.<class>` mangling.
-- Sign inside-out: extension first, then the containing app. Only the extension
-  carries the entitlements.
-
-### Install location matters
-
-`pkd` does **not** pick up extensions from `~/Applications`. The same bundle in
-`/Applications` registers immediately.
-
-### iCloud Desktop & Documents suppresses FinderSync items
-
-With "Desktop & Documents Folders" sync on, `~/Desktop` is a CloudDocs-managed
-location (`~/Library/Mobile Documents/com~apple~CloudDocs/Desktop` is a symlink
-to it, and the context menu grows *Remove Download* / *Keep Downloaded*).
-FinderSync extension items do not appear there. The same folder moved to a plain
-local path shows them immediately.
-
-The Services submenu **is** present on iCloud items, so Automator Quick Actions
-remain a working fallback for those locations.
-
----
-
-## 3. Automator gotchas
-
-**`inputMethod` is inverted from the obvious reading.** In the Run Shell Script
-action: `0` = pass input to **stdin**, `1` = pass input as **arguments**. With
-`0`, `"$@"` is empty and the script silently does nothing.
-
----
-
-## 4. zsh gotchas
-
-Two zsh-specific traps hit while writing the action scripts:
-
-- **`path` is a special variable** tied to `$PATH` as an array. A local named
-  `path` makes `${path[1,5]}` do array subscripting instead of string slicing,
-  so prefix comparisons silently never match. Use `[[ $tgt == "$m"/* ]]` and a
-  different variable name.
-- **`status` is read-only** (an alias for `$?`). Assigning to it aborts the
-  script.

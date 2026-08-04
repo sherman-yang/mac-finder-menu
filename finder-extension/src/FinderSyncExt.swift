@@ -40,6 +40,20 @@ final class FinderSyncExt: FIFinderSync {
         size.target = self
         menu.addItem(size)
 
+        let vscode = NSMenuItem(
+            title: "Open in VS Code (New Window)",
+            action: #selector(runVSCode(_:)),
+            keyEquivalent: "")
+        vscode.target = self
+        menu.addItem(vscode)
+
+        let addToWorkspace = NSMenuItem(
+            title: "Add to VS Code Workspace",
+            action: #selector(runVSCodeAdd(_:)),
+            keyEquivalent: "")
+        addToWorkspace.target = self
+        menu.addItem(addToWorkspace)
+
         return menu
     }
 
@@ -51,6 +65,14 @@ final class FinderSyncExt: FIFinderSync {
 
     @objc func runShowSize(_ sender: AnyObject?) {
         run(script: "showsize")
+    }
+
+    @objc func runVSCode(_ sender: AnyObject?) {
+        run(script: "vscode")
+    }
+
+    @objc func runVSCodeAdd(_ sender: AnyObject?) {
+        run(script: "vscode-add")
     }
 
     /// Selected paths come from the controller; when the user right-clicked the
