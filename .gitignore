@@ -1,0 +1,9 @@
+# Claude Code machine-local state
+.claude/
+
+# build output
+build/
+*.o
+
+# macOS
+.DS_Store
