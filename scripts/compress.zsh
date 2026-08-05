@@ -70,6 +70,44 @@ is_restricted() {  # SIP-protected?
 	(( f & SF_RESTRICTED ))
 }
 
+# --- files currently open for writing --------------------------------------
+# Compression replaces a file by writing a temp copy and renaming over it, which
+# swaps the inode. A process holding the file open for WRITING goes on writing to
+# the detached old inode: those writes vanish when it closes, and for a SQLite
+# set (db + -wal + -shm) that is corruption. Readers are safe — an existing fd
+# keeps reading consistent old data — so only w/u modes are excluded.
+#
+# There is no cheap "who has THIS file open" query on macOS — lsof answers it by
+# walking every process's fd table, the same cost as listing everything. So the
+# check cannot literally run per file. Instead the snapshot is refreshed between
+# batches once it is older than SNAP_TTL seconds, which keeps each file's check
+# at most a few seconds stale (batch time + TTL) instead of as stale as the whole
+# run.
+#
+# -n -P -l are load bearing: without them lsof does reverse DNS and port/user
+# lookups unrelated to files, costing ~13 s instead of ~0.4 s (measured).
+#
+# Two limits by design: a file opened inside the residual window is still not
+# covered (a race, where without the guard it was a certainty); and an
+# unprivileged lsof cannot see files held open by root daemons.
+SNAP_TTL=${AFSC_SNAP_TTL:-5}
+typeset -A open_writers
+snap_taken=0
+
+refresh_open_writers() {
+	local now=$(/bin/date +%s)
+	(( now - snap_taken < SNAP_TTL )) && return 0
+	open_writers=()
+	local line
+	while IFS= read -r line; do
+		open_writers[$line]=1
+	done < <(/usr/sbin/lsof -n -P -l -u "$UID" -F an 2>/dev/null \
+		| /usr/bin/awk '
+			/^a/   { mode = substr($0, 2) }
+			/^n\// { if (mode == "w" || mode == "u") print substr($0, 2) }')
+	snap_taken=$now
+}
+
 (( $# )) || exit 0
 
 if [[ ! -x $APPLESAUCE ]]; then
@@ -131,11 +169,71 @@ ${skip_block}"
 	exit 0
 fi
 
-# --- compress --------------------------------------------------------------
+# --- enumerate candidate files ----------------------------------------------
+# Enumerating here rather than handing directories to applesauce is what makes
+# the open-writer exclusion possible at all. It also skips already-compressed
+# files at the find layer, so re-runs do less work. NUL-delimited, so paths with
+# spaces and newlines survive — though a newline path can never match lsof's
+# newline-delimited output, so it fails open: compressed, exactly as it would
+# have been before this guard existed.
+typeset -a files
+files=("${(@0)$(/usr/bin/find "${targets[@]}" -type f ! -flags compressed -print0 2>/dev/null)}")
+# NUL-splitting leaves one empty element for an empty stream — drop empties.
+files=(${files:#})
+
+if (( $#files == 0 )); then
+	alert "Nothing to compress" "No uncompressed files in the selection.
+${skip_block}"
+	exit 0
+fi
+
+# --- compress in batches, re-checking open writers between them --------------
+# Each batch is filtered against a snapshot at most SNAP_TTL seconds old, so a
+# file's check happens moments before its compression, not at the start of a
+# possibly long run. BATCH keeps each applesauce invocation well under ARG_MAX
+# (getconf ARG_MAX = 1 MB; 500 paths ≈ 75 KB at typical lengths).
+BATCH=${AFSC_BATCH:-500}
 before=$(disk_kb "${targets[@]}")
-output=$("$APPLESAUCE" compress --verify "${targets[@]}" 2>&1)
-rc=$?                     # `status` is read-only in zsh — do not use it here
+
+open_skipped=0
+compressed_count=0
+rc=0
+output=""
+typeset -a batch eligible
+
+for (( i = 1; i <= $#files; i += BATCH )); do
+	batch=("${(@)files[i, i + BATCH - 1]}")
+	refresh_open_writers
+
+	eligible=()
+	for f in "${batch[@]}"; do
+		if [[ -n ${open_writers[$f]-} ]]; then
+			(( open_skipped++ ))
+		else
+			eligible+=("$f")
+		fi
+	done
+	(( $#eligible )) || continue
+
+	batch_out=$("$APPLESAUCE" compress --verify "${eligible[@]}" 2>&1)
+	if (( $? != 0 )); then
+		rc=1
+		output=$batch_out       # keep the most recent failure for the alert
+	fi
+	(( compressed_count += $#eligible ))
+done
+
 after=$(disk_kb "${targets[@]}")
+
+if (( open_skipped > 0 )); then
+	skip_block+="Skipped $open_skipped file(s) open for writing"$'\n'
+fi
+
+if (( compressed_count == 0 )); then
+	alert "Nothing to compress" "Every uncompressed file in the selection was open for writing.
+${skip_block}"
+	exit 0
+fi
 
 if (( rc != 0 )); then
 	alert "Compression failed" "$output"

@@ -41,6 +41,7 @@ Refuses to touch:
 | Volume roots | the target is itself a mount point |
 | Home folder root | target equals `${HOME:A}` |
 | Non-APFS/HFS+ volumes | filesystem type from `mount`, matched to the longest containing mount point |
+| Files open for writing | `lsof` snapshot refreshed between batches (≤5 s stale); compression swaps the inode, so a writer on the old one would lose data. Only w/u modes are excluded — replacing under a reader is safe |
 
 Skipped items are listed with their reason in the result dialog; the rest of the
 selection is still processed.
@@ -174,6 +175,16 @@ for. To undo compression itself: `applesauce decompress <path>`.
   compression, and incompressible files are re-read on every run because they
   carry no "already tried" marker. Details and measurements in
   [docs/FINDINGS.md](docs/FINDINGS.md).
+
+**If you used a build from before the broker change**, compressed files were
+created by a sandboxed process and so were stamped with `com.apple.quarantine`,
+which makes Gatekeeper block native extensions (`.so`, `.dylib`) on load — a
+virtualenv compressed by such a build stops importing. Audit and repair:
+
+```sh
+find ~/your-projects -type f -xattrname com.apple.quarantine   # single fast pass
+xattr -dr com.apple.quarantine <dir>                           # strip
+```
 
 ## Layout
 

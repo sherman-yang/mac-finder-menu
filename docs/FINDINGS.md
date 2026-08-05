@@ -104,6 +104,37 @@ so two concurrent instances never run one twice, anything older than 60 s is
 discarded as stale rather than replayed, and an empty spool means the launch
 was a real double-click, which gets the explainer dialog.
 
+### A sandboxed writer stamps every file it creates with `com.apple.quarantine`
+
+This one shipped and bit a user before it was understood. While the extension
+still ran scripts itself (before the broker), compressing a Python virtualenv
+left every native extension in it unloadable: macOS put up *"Apple could not
+verify `cd.cpython-314-darwin.so` is free of malware"* with a **Move to Trash**
+button, ~99 `.so` files at once.
+
+The mechanism has nothing to do with compression as such. Compression replaces
+a file by writing a temp copy and renaming over it — so every compressed file
+is a **newly created** file. Files created by a sandboxed process inherit
+`com.apple.quarantine` (the sandbox exists partly to stop a compromised app
+from dropping a runnable executable), and Gatekeeper then blocks the unsigned
+`.so` on load.
+
+It is invisible in testing that runs the script from a terminal, because that
+shell is not sandboxed. Only a real menu click reproduces it — the same trap as
+the `pgrep` blindness above.
+
+The broker architecture fixes it as a side effect: scripts now run in the
+unsandboxed host, and files they create carry no quarantine. Verified by
+driving the full production path (spool file + host launch) over a `.so` and
+checking the xattrs before and after.
+
+Cleanup for anything damaged by an older build:
+
+```sh
+find <dir> -type f -xattrname com.apple.quarantine      # fast audit, single pass
+xattr -dr com.apple.quarantine <dir>                    # strip
+```
+
 ### What the inherited sandbox still blocks: process visibility
 
 `pgrep -f` (and anything else that reads other processes' command lines) comes
@@ -281,3 +312,34 @@ path list:
 |---|---|
 | `/System` `/usr` `/bin` `/sbin` | yes |
 | `/` `/Applications` `/Library` `/usr/local` `~` `~/Library` | no |
+
+### Files open for writing must be skipped — and how cheaply that is possible
+
+Compression replaces a file by writing a temp copy and renaming over it, which
+swaps the inode. A process holding the file open **for writing** keeps writing
+to the detached old inode; those writes vanish when it closes, and for a SQLite
+set (db + `-wal` + `-shm`) that is corruption. Readers are unaffected — an
+existing fd keeps reading consistent old data — so the compress action excludes
+only files open in `w`/`u` modes. (Measured on this machine while logged in:
+~3,700 files open under `~/Library`, ~1,250 of them database-class. That is why
+compressing `~/Library` wholesale is a bad idea with or without this guard.)
+
+Two things about the detection were worth measuring:
+
+- **`lsof -n -P -l` is a 38× speedup.** A full `lsof -u <uid> -F an` snapshot
+  took 13.7 s; with `-n -P -l` (skip reverse DNS, port names, user names —
+  lookups that have nothing to do with files) the identical snapshot took
+  0.36 s.
+- **There is no cheap per-file "who has this open" query on macOS.** lsof
+  answers it by walking every process's fd table — the same cost as listing
+  everything — so a literal check-before-each-file design multiplies the full
+  snapshot cost by the file count. The closest achievable is compressing in
+  batches and refreshing the snapshot between batches once it is older than a
+  few seconds, which keeps each file's check moments old instead of
+  run-duration old.
+
+Residual limits, by design: a file opened inside the remaining seconds-wide
+window is still missed (a race, where without the guard it was a certainty); an
+unprivileged lsof cannot see files held open by root daemons; and a path
+containing a newline can never match lsof's newline-delimited output, so it
+fails open — compressed, exactly as before the guard existed.
