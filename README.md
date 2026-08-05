@@ -10,12 +10,17 @@ getting an item to show up in Finder's context menu at all.
 
 Four ship with the project today.
 
-| Menu item | What it does |
-|---|---|
-| **Compress (APFS Transparent)** | Applies AFSC transparent compression to the selection |
-| **Show Actual Size on Disk** | Real on-disk usage vs logical size, plus compression coverage |
-| **Open in VS Code (New Window)** | Opens the selection as a fresh workspace window |
-| **Add to VS Code Workspace** | Sends the selection to the last active window instead |
+| Menu item | What it does | Also in Services submenu |
+|---|---|---|
+| **Open in VS Code (New Window)** | Opens the selection as a fresh workspace window | no |
+| **Add to VS Code Workspace** | Sends the selection to the last active window instead | no |
+| **Compress (APFS Transparent)** | Applies AFSC transparent compression to the selection | yes |
+| **Show Actual Size on Disk** | Real on-disk usage vs logical size, plus compression coverage | yes |
+
+The Services-submenu copies exist for iCloud-managed Desktop/Documents, where
+Finder suppresses top-level extension items. The VS Code items skip them — a
+submenu duplicate of something already at the top level is noise — at the cost
+of not being offered in those iCloud locations.
 
 ### Compress (APFS Transparent)
 
@@ -51,12 +56,16 @@ in a fresh workspace window.
 two kinds of item mean different things there, so they take different flags:
 folders go through `--add` to become workspace roots (VS Code documents `--add`
 as taking a `<folder>`), files through `--reuse-window` to open as editors in
-that same window. A mixed selection gets both.
+that same window. A mixed selection gets both. With no VS Code running there is
+no window to add to, so the selection is simply opened.
 
-Both start VS Code through LaunchServices first if it is not already running.
-That is deliberate: the Finder extension is sandboxed, and a VS Code launched as
-its child would inherit the sandbox. Once VS Code is up, the `code` CLI only
-talks to it over IPC and exits.
+The `code` CLI is only ever used against an already-running VS Code, where it
+does nothing but IPC. When VS Code is not running, the selection goes through
+`open -a` instead, so LaunchServices launches it — never the sandboxed Finder
+extension, whose sandbox a child VS Code would inherit. Whether it is running
+is read via `NSRunningApplication` (through `osascript`), not `pgrep`: the
+sandbox blocks reading other processes' command lines, which makes `pgrep -f`
+return nothing there (docs/FINDINGS.md).
 
 ### Show Actual Size on Disk
 
@@ -80,19 +89,35 @@ FinderSync extension is the only supported way to reach the top level. The
 Quick Actions exist as a fallback because Finder suppresses FinderSync items in
 iCloud-managed locations (see Limitations).
 
+The extension itself never runs the scripts: pkd forces it into the App
+Sandbox, which everything it spawns would inherit — that silently broke any
+action whose tooling spawns further processes (the VS Code CLI, for one). On a
+menu click it writes the request to a spool directory and launches the **host
+app** bare through LaunchServices; the host — unsandboxed, parented to
+launchd — drains the spool and runs the script with normal user rights. (A
+spool file rather than argv because LaunchServices strips
+`OpenConfiguration.arguments` from sandboxed callers.) Details in
+[docs/FINDINGS.md](docs/FINDINGS.md).
+
 Both front-ends embed the same scripts from `scripts/` at build time, so a menu
-item's logic has one home.
+item's logic has one home. Within the top-level block, items appear in the
+order they are added in `menu(for:)` — the two VS Code items first. The
+Services submenu is sorted alphabetically by macOS; item order there is not
+controllable.
 
 ## Adding your own menu item
 
 1. Write `scripts/<name>.zsh`. It receives the selected paths as `"$@"`. Show a
    result with `osascript` if the action needs one — `vscode.zsh` is the
    shortest example, `showsize.zsh` the most complete.
-2. Register it in both front-ends:
+2. Register it:
    - `finder-extension/src/FinderSyncExt.swift` — add an `NSMenuItem` in
      `menu(for:)` plus an `@objc` action calling `run(script:)`
-   - `quick-actions/build_quickactions.py` — add an entry to `ACTIONS`
-3. `./install.sh`
+   - `quick-actions/build_quickactions.py` — add an entry to `ACTIONS` only if
+     the item should also appear in the Services submenu (the iCloud
+     Desktop/Documents fallback)
+3. `./install.sh` — it also removes previously installed Quick Actions that are
+   no longer built, keyed on the `MacFinderMenuOwned` marker
 
 The build copies every `scripts/*.zsh` into the extension, so there is nothing
 to edit in `build.sh`. Menu items are declared in source rather than in a config
@@ -156,7 +181,7 @@ for. To undo compression itself: `applesauce decompress <path>`.
 scripts/              the menu item scripts — single source of truth
 finder-extension/     Swift FinderSync app extension (top-level menu items)
   src/                FinderSyncExt.swift, host.swift
-  ext.entitlements    sandbox + temporary exception (both mandatory)
+  ext.entitlements    app-sandbox only (pkd requires it; actions run in the host)
   build.sh
 quick-actions/        Automator .workflow builder (Services submenu)
 install.sh

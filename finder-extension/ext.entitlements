@@ -3,16 +3,15 @@
 <plist version="1.0">
 <dict>
 	<!-- pkd refuses to register a com.apple.FinderSync extension that is not
-	     sandboxed; verified on macOS 26.6. Everything below exists to give the
-	     sandboxed extension (and the zsh child it spawns) enough reach to do the
-	     work the user asked for. -->
+	     sandboxed; verified on macOS 26.6. The extension only builds the menu and
+	     brokers every action to the unsandboxed host app (see host.swift). The
+	     one write it needs: spool files carrying the request, because
+	     LaunchServices does not deliver OpenConfiguration.arguments from a
+	     sandboxed caller. -->
 	<key>com.apple.security.app-sandbox</key><true/>
-	<key>com.apple.security.files.user-selected.read-write</key><true/>
-	<key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
 	<array>
-		<string>/</string>
+		<string>/Library/Application Support/AFSCFinderMenu/</string>
 	</array>
-	<!-- the bundled scripts report their result through osascript -->
-	<key>com.apple.security.automation.apple-events</key><true/>
 </dict>
 </plist>

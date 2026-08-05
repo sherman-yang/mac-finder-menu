@@ -29,16 +29,10 @@ ACTIONS = [
         "menu": "Show Actual Size on Disk",
         "script": "showsize.zsh",
     },
-    {
-        "bundle": "Open in VS Code (New Window).workflow",
-        "menu": "Open in VS Code (New Window)",
-        "script": "vscode.zsh",
-    },
-    {
-        "bundle": "Add to VS Code Workspace.workflow",
-        "menu": "Add to VS Code Workspace",
-        "script": "vscode-add.zsh",
-    },
+    # The VS Code items are top-level only, by request: a Services-submenu copy
+    # of something already at the top level is just noise. The cost is that they
+    # are unavailable on iCloud-managed Desktop/Documents, where only the
+    # Services submenu works — add entries back here if that ever matters.
 ]
 
 

@@ -65,6 +65,9 @@ done
 /System/Library/CoreServices/pbs -flush 2>/dev/null || true
 
 # --- restart Finder so both front-ends load -------------------------------
+# The old extension process may outlive a Finder restart and keep serving
+# stale code — kill it so the next menu click loads the fresh binary.
+pkill -f AFSCFinderExtension.appex 2>/dev/null || true
 killall Finder 2>/dev/null || true
 sleep 3
 

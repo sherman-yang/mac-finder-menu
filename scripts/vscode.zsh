@@ -3,9 +3,18 @@
 # Opens the selection as a fresh workspace window, whether it is files, folders
 # or a mix.
 #
+# Two paths on purpose. When VS Code is already running, the bundled `code` CLI
+# expresses --new-window over IPC. When it is not, the selection is handed to
+# LaunchServices in one shot (open -a with the paths) — a fresh instance IS a
+# new window, launched by launchd rather than as this script's child, and there
+# is nothing to poll for (see docs/FINDINGS.md for the launch-and-poll version
+# this replaced).
+#
 # macOS-only by design. No success dialog: VS Code coming to the front is the
 # feedback. Only failures are reported.
 emulate -L zsh
+
+BUNDLE_ID="com.microsoft.VSCode"
 
 alert() {
 	/usr/bin/osascript - "$1" "$2" <<'OSA'
@@ -21,24 +30,15 @@ find_vscode() {
 	         "$HOME/Applications/Visual Studio Code.app"; do
 		[[ -d $p ]] && { print -r -- "$p"; return 0 }
 	done
-	p=$(/usr/bin/mdfind "kMDItemCFBundleIdentifier == 'com.microsoft.VSCode'" 2>/dev/null | /usr/bin/head -1)
+	p=$(/usr/bin/mdfind "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null | /usr/bin/head -1)
 	[[ -n $p && -d $p ]] && { print -r -- "$p"; return 0 }
 	return 1
 }
 
-# Start VS Code through LaunchServices if it is not running yet. This matters:
-# the Finder extension is sandboxed, and a VS Code launched as its child would
-# inherit that sandbox. Once VS Code is up, the `code` CLI only talks to it over
-# IPC and exits, so the sandboxed child is short-lived and harmless.
-ensure_running() {
-	local app=$1 i
-	/usr/bin/pgrep -f "$app/Contents/MacOS/" >/dev/null 2>&1 && return 0
-	/usr/bin/open -g -a "$app" 2>/dev/null || return 1
-	for i in {1..40}; do
-		/bin/sleep 0.25
-		/usr/bin/pgrep -f "$app/Contents/MacOS/" >/dev/null 2>&1 && return 0
-	done
-	return 1
+# NSRunningApplication via AppleScript: works from the sandbox (unlike pgrep),
+# sends no Apple event to VS Code, and does not launch it.
+is_running() {
+	[[ $(/usr/bin/osascript -e "application id \"$BUNDLE_ID\" is running" 2>/dev/null) == true ]]
 }
 
 (( $# )) || exit 0
@@ -47,7 +47,7 @@ app=$(find_vscode) || {
 	alert "VS Code not found" "Looked in:
 /Applications
 ~/Applications
-and Spotlight (bundle id com.microsoft.VSCode)
+and Spotlight (bundle id $BUNDLE_ID)
 
 Install it from https://code.visualstudio.com"
 	exit 1
@@ -55,20 +55,11 @@ Install it from https://code.visualstudio.com"
 
 cli="$app/Contents/Resources/app/bin/code"
 
-if [[ ! -x $cli ]]; then
-	# No bundled CLI: LaunchServices can still open the paths, just without
-	# control over which window they land in.
-	/usr/bin/open -a "$app" -- "$@" 2>/dev/null || alert "Could not open in VS Code" "VS Code was found at:
-$app"
-	exit
-fi
-
-if ! ensure_running "$app"; then
-	alert "Could not start VS Code" "VS Code was found at:
+if is_running && [[ -x $cli ]]; then
+	# Paths from Finder are always absolute, so none can be mistaken for a flag.
+	"$cli" --new-window "$@" || alert "Could not open in VS Code" "$cli exited $?"
+else
+	/usr/bin/open -a "$app" -- "$@" || alert "Could not open in VS Code" "VS Code was found at:
 $app
-but it did not come up within 10 seconds."
-	exit 1
+but LaunchServices refused to open the selection with it."
 fi
-
-# Paths from Finder are always absolute, so none can be mistaken for a flag.
-"$cli" --new-window "$@" || alert "Could not open in VS Code" "$cli exited $?"

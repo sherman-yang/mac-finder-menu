@@ -44,10 +44,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>CFBundleShortVersionString</key><string>1.0</string>
 	<key>CFBundleVersion</key><string>1</string>
 	<key>LSMinimumSystemVersion</key><string>$MIN_OS</string>
+	<!-- No Dock icon: broker launches (see host.swift) would otherwise flash one
+	     for every menu click. UI mode opts back in at runtime. -->
+	<key>LSUIElement</key><true/>
 	<key>NSHumanReadableCopyright</key><string>Local build</string>
 </dict>
 </plist>
 PLIST
+
+# Menu item scripts live in the HOST app: the extension brokers every action to
+# it (see host.swift), so the host is what needs them at runtime.
+cp "$SCRIPTS"/*.zsh "$APP/Contents/Resources/"
 
 # --- extension ------------------------------------------------------------
 # App extensions enter through NSExtensionMain, not main(); -parse-as-library
@@ -89,9 +96,6 @@ cat > "$EXT/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Every script rides along inside the extension so there is no external path to
-# break. Copying the whole directory means adding a menu item never touches this.
-cp "$SCRIPTS"/*.zsh "$EXT/Contents/Resources/"
 
 # --- sign (ad-hoc) --------------------------------------------------------
 # Inside-out: extension first, then the app that contains it. Only the extension

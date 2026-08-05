@@ -49,18 +49,84 @@ To watch this for yourself:
 log stream --style compact --predicate 'process == "pkd"'
 ```
 
-### A sandboxed extension can still do the work
+### Running the actions: children inherit the sandbox, so broker them out
 
-The sandbox does not have to be a dead end.
-`com.apple.security.temporary-exception.files.absolute-path.read-write = /`
-grants the extension — and any child process it spawns — read-write access
-everywhere. Verified end-to-end: right-click → Compress on a 17 MB folder
-produced 88 KB on disk with `UF_COMPRESSED` set on files in subdirectories, no
-sandbox denials logged.
+Everything the extension spawns inherits its sandbox. A file-access exception
+(`temporary-exception.files.absolute-path.read-write = /`) is enough for simple
+children — a spawned `zsh` + `applesauce` compressed a 17 MB folder end-to-end
+under it, no denials logged. It is **not** enough for complex ones:
 
-This is what makes "menu item = shell script" viable at all: the extension
-spawns `/bin/zsh` with the selected paths as arguments, and the child inherits
-the sandbox *including* the exception.
+The VS Code CLI failed silently from the sandboxed extension. `bin/code` runs
+`cli.js` under Electron-as-node, which spawns the real Electron main process
+detached and exits 0 immediately; that child — inheriting the seatbelt — has to
+connect to the singleton unix socket in `~/Library/Application Support/Code/`
+(an outbound-network operation the sandbox denies, never granted by the file
+exception) and run Chromium startup under a foreign profile. The child died,
+the CLI had already reported success, so the menu item did nothing and showed
+nothing. Every headless test passed, because test shells are not sandboxed.
+
+The fix is architectural, not another entitlement: the extension never runs
+scripts at all. It hands each request to its own **unsandboxed host app** —
+LaunchServices parents the host to launchd, sandbox-free, because only the
+`.appex` needs the sandbox (pkd's requirement); the app carrying it does not.
+Menu item scripts thereby run with normal user rights: pgrep works, CLIs work,
+no file exceptions needed. The host sets `LSUIElement` so these launches never
+flash a Dock icon.
+
+**But argv does not survive the trip.** The first broker used
+`NSWorkspace.OpenConfiguration.arguments` (`createsNewApplicationInstance =
+true`). Launched that way from the sandboxed extension, the host received no
+arguments at all and fell through to its no-arguments UI mode — LaunchServices
+does not deliver `OpenConfiguration.arguments` from a sandboxed caller.
+(Consistent with the legacy `NSWorkspaceLaunchConfigurationArguments`, which
+was documented as unavailable to sandboxed apps. Blocking it is what keeps
+"launch my unsandboxed helper with arbitrary argv" from being a trivial
+sandbox escape — which is exactly what a Finder-menu runner needs to be, so
+the project does it with data the user handed it rather than argv.)
+
+The working transport is a **spool file**: the extension serialises
+`{script, paths}` to `~/Library/Application Support/AFSCFinderMenu/spool/` —
+the one home-relative path its entitlements allow
+(`temporary-exception.files.home-relative-path.read-write`) — then launches
+the host bare.
+
+Resolving "~" from inside the sandbox is its own trap. `NSHomeDirectory()`
+returns the container, as documented — but so does
+`FileManager.homeDirectory(forUser:)` (verified: requests written through it
+landed in
+`~/Library/Containers/<ext-id>/Data/Library/Application Support/…` while the
+host watched the real path). What is not virtualized is the account record:
+`getpwuid(getuid()).pw_dir` yields the real home. The host also drains the
+container's view of the spool path as a belt-and-braces fallback, so delivery
+no longer depends on which home the extension ended up with. The
+host drains the spool on every launch: requests are claimed by atomic rename
+so two concurrent instances never run one twice, anything older than 60 s is
+discarded as stale rather than replayed, and an empty spool means the launch
+was a real double-click, which gets the explainer dialog.
+
+### What the inherited sandbox still blocks: process visibility
+
+`pgrep -f` (and anything else that reads other processes' command lines) comes
+back empty inside the extension's sandbox. This failed in the field, not in
+testing: a launch-and-poll helper that waited for VS Code via
+`pgrep -f '<app path>'` always timed out when run from the menu item, while the
+identical script passed every headless test — the test shell was not sandboxed,
+so the difference was invisible until a real click.
+
+Consequences for menu item scripts:
+
+- Never gate on `pgrep`. Ask LaunchServices instead —
+  `osascript -e 'application id "com.example.app" is running'` reads
+  `NSRunningApplication`, works from the sandbox, sends no Apple event to the
+  target and does not launch it.
+- Better, avoid launch-and-poll entirely. `open -a App -- <paths>` hands the
+  documents to LaunchServices in one shot and they arrive as the app starts;
+  polling for readiness is a smell here. Measured on this machine, VS Code goes
+  from not-running to LS-registered in 0.4 s, so the 10-second timeout the
+  polling version hit was never the app being slow — the check was blind.
+- Never let a script cold-start an app the user will keep using: a child of the
+  extension inherits the sandbox. `open` launches it parented by launchd
+  instead.
 
 ### Other requirements found by comparison
 

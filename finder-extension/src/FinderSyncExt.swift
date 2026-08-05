@@ -26,20 +26,7 @@ final class FinderSyncExt: FIFinderSync {
             return menu   // no toolbar / sidebar entries
         }
 
-        let compress = NSMenuItem(
-            title: "Compress (APFS Transparent)",
-            action: #selector(runCompress(_:)),
-            keyEquivalent: "")
-        compress.target = self
-        menu.addItem(compress)
-
-        let size = NSMenuItem(
-            title: "Show Actual Size on Disk",
-            action: #selector(runShowSize(_:)),
-            keyEquivalent: "")
-        size.target = self
-        menu.addItem(size)
-
+        // Order here is the order Finder shows within our block.
         let vscode = NSMenuItem(
             title: "Open in VS Code (New Window)",
             action: #selector(runVSCode(_:)),
@@ -54,18 +41,24 @@ final class FinderSyncExt: FIFinderSync {
         addToWorkspace.target = self
         menu.addItem(addToWorkspace)
 
+        let compress = NSMenuItem(
+            title: "Compress (APFS Transparent)",
+            action: #selector(runCompress(_:)),
+            keyEquivalent: "")
+        compress.target = self
+        menu.addItem(compress)
+
+        let size = NSMenuItem(
+            title: "Show Actual Size on Disk",
+            action: #selector(runShowSize(_:)),
+            keyEquivalent: "")
+        size.target = self
+        menu.addItem(size)
+
         return menu
     }
 
     // MARK: - Actions
-
-    @objc func runCompress(_ sender: AnyObject?) {
-        run(script: "compress")
-    }
-
-    @objc func runShowSize(_ sender: AnyObject?) {
-        run(script: "showsize")
-    }
 
     @objc func runVSCode(_ sender: AnyObject?) {
         run(script: "vscode")
@@ -73,6 +66,14 @@ final class FinderSyncExt: FIFinderSync {
 
     @objc func runVSCodeAdd(_ sender: AnyObject?) {
         run(script: "vscode-add")
+    }
+
+    @objc func runCompress(_ sender: AnyObject?) {
+        run(script: "compress")
+    }
+
+    @objc func runShowSize(_ sender: AnyObject?) {
+        run(script: "showsize")
     }
 
     /// Selected paths come from the controller; when the user right-clicked the
@@ -88,37 +89,65 @@ final class FinderSyncExt: FIFinderSync {
         return []
     }
 
+    /// Broker pattern: the extension never runs the script itself. This appex is
+    /// sandboxed (pkd requires that), and everything a script spawns inherits the
+    /// sandbox — which silently killed the VS Code CLI: its detached Electron
+    /// child could not run under the inherited seatbelt, while the CLI itself had
+    /// already exited 0 (see docs/FINDINGS.md). Instead, hand the request to our
+    /// own host app: LaunchServices parents it to launchd, and the host has no
+    /// sandbox entitlement, so the script runs unrestricted.
+    ///
+    /// The request travels as a spool file, not as argv: LaunchServices does not
+    /// deliver OpenConfiguration.arguments from a sandboxed caller (observed —
+    /// the host launched straight into its no-arguments UI mode). The spool
+    /// directory is the one home-relative path the extension's entitlements
+    /// allow it to write.
     private func run(script: String) {
         let paths = selectedPaths()
         guard !paths.isEmpty else {
             NSLog("AFSC: nothing selected")
             return
         }
-        guard let scriptPath = Bundle.main.path(forResource: script, ofType: "zsh") else {
-            NSLog("AFSC: bundled script \(script).zsh not found")
+
+        // In the sandbox, NSHomeDirectory() AND FileManager.homeDirectory(forUser:)
+        // both report the container as home (verified: requests written through
+        // the latter landed in the container). getpwuid reads the account record
+        // directly and is not virtualized, so it yields the real home — which is
+        // where the entitlement's home-relative exception applies.
+        guard let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir else {
+            NSLog("AFSC: cannot resolve real home directory")
+            return
+        }
+        let home = String(cString: dir)
+        let spoolDir = home + "/Library/Application Support/AFSCFinderMenu/spool"
+
+        do {
+            try FileManager.default.createDirectory(
+                atPath: spoolDir, withIntermediateDirectories: true)
+            let request: [String: Any] = ["script": script, "paths": paths]
+            let data = try JSONSerialization.data(withJSONObject: request)
+            let file = spoolDir + "/req-\(UUID().uuidString).json"
+            try data.write(to: URL(fileURLWithPath: file), options: .atomic)
+        } catch {
+            NSLog("AFSC: spool write failed: \(error)")
             return
         }
 
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = [scriptPath] + paths
+        let hostURL = Bundle.main.bundleURL                 // …/Host.app/Contents/PlugIns/X.appex
+            .deletingLastPathComponent()                    // PlugIns
+            .deletingLastPathComponent()                    // Contents
+            .deletingLastPathComponent()                    // Host.app
 
-        // The extension is sandboxed (pkd requires it), so surface anything the
-        // child trips over instead of failing silently.
-        let errPipe = Pipe()
-        task.standardError = errPipe
-        task.terminationHandler = { proc in
-            let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let err = String(data: data, encoding: .utf8) ?? ""
-            NSLog("AFSC: \(script).zsh exited \(proc.terminationStatus)"
-                  + (err.isEmpty ? "" : " — stderr: \(err)"))
-        }
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.createsNewApplicationInstance = true
+        cfg.activates = false
 
-        do {
-            try task.run()
-            NSLog("AFSC: launched \(script).zsh for \(paths.count) item(s)")
-        } catch {
-            NSLog("AFSC: failed to launch \(scriptPath): \(error)")
+        NSWorkspace.shared.openApplication(at: hostURL, configuration: cfg) { _, error in
+            if let error {
+                NSLog("AFSC: broker launch failed: \(error)")
+            } else {
+                NSLog("AFSC: brokered \(script) for \(paths.count) item(s)")
+            }
         }
     }
 }

@@ -8,9 +8,16 @@
 #                              --add as taking <folder>)
 #   files   -> --reuse-window  open as editors in that same window
 #
+# When VS Code is not running there is no window to add to, so the selection is
+# simply opened (open -a): a fresh instance showing exactly these items is the
+# closest meaning "add" has in that state — launched by launchd rather than as
+# this script's child, with nothing to poll for (see docs/FINDINGS.md).
+#
 # macOS-only by design. No success dialog: the window updating is the feedback.
 # Only failures are reported.
 emulate -L zsh
+
+BUNDLE_ID="com.microsoft.VSCode"
 
 alert() {
 	/usr/bin/osascript - "$1" "$2" <<'OSA'
@@ -26,22 +33,15 @@ find_vscode() {
 	         "$HOME/Applications/Visual Studio Code.app"; do
 		[[ -d $p ]] && { print -r -- "$p"; return 0 }
 	done
-	p=$(/usr/bin/mdfind "kMDItemCFBundleIdentifier == 'com.microsoft.VSCode'" 2>/dev/null | /usr/bin/head -1)
+	p=$(/usr/bin/mdfind "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null | /usr/bin/head -1)
 	[[ -n $p && -d $p ]] && { print -r -- "$p"; return 0 }
 	return 1
 }
 
-# See vscode.zsh — VS Code must already be running so the sandboxed extension
-# never becomes its parent.
-ensure_running() {
-	local app=$1 i
-	/usr/bin/pgrep -f "$app/Contents/MacOS/" >/dev/null 2>&1 && return 0
-	/usr/bin/open -g -a "$app" 2>/dev/null || return 1
-	for i in {1..40}; do
-		/bin/sleep 0.25
-		/usr/bin/pgrep -f "$app/Contents/MacOS/" >/dev/null 2>&1 && return 0
-	done
-	return 1
+# NSRunningApplication via AppleScript: works from the sandbox (unlike pgrep),
+# sends no Apple event to VS Code, and does not launch it.
+is_running() {
+	[[ $(/usr/bin/osascript -e "application id \"$BUNDLE_ID\" is running" 2>/dev/null) == true ]]
 }
 
 (( $# )) || exit 0
@@ -50,27 +50,19 @@ app=$(find_vscode) || {
 	alert "VS Code not found" "Looked in:
 /Applications
 ~/Applications
-and Spotlight (bundle id com.microsoft.VSCode)
+and Spotlight (bundle id $BUNDLE_ID)
 
 Install it from https://code.visualstudio.com"
 	exit 1
 }
 
 cli="$app/Contents/Resources/app/bin/code"
-if [[ ! -x $cli ]]; then
-	alert "VS Code CLI not found" "Expected at:
-$cli
 
-Adding to an existing workspace needs the bundled CLI — LaunchServices cannot
-express it."
-	exit 1
-fi
-
-if ! ensure_running "$app"; then
-	alert "Could not start VS Code" "VS Code was found at:
+if ! is_running || [[ ! -x $cli ]]; then
+	/usr/bin/open -a "$app" -- "$@" || alert "Could not open in VS Code" "VS Code was found at:
 $app
-but it did not come up within 10 seconds."
-	exit 1
+but LaunchServices refused to open the selection with it."
+	exit
 fi
 
 typeset -a dirs files
